@@ -15,7 +15,7 @@ import os
 import json
 import re
 import random
-import smtplib
+# import smtplib  <-- Commented out as we are using n8n Webhooks now
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -25,9 +25,10 @@ import base64
 from dotenv import load_dotenv
 import pathlib
 import socket
-import urllib.request # <--- Added for n8n Webhook
+import urllib.request
 
 # --- FORCE IPv4 FIX ---
+# This monkey-patches socket.getaddrinfo to ignore IPv6, fixing the Render "Network unreachable" error
 old_getaddrinfo = socket.getaddrinfo
 def new_getaddrinfo(*args, **kwargs):
     responses = old_getaddrinfo(*args, **kwargs)
@@ -35,6 +36,7 @@ def new_getaddrinfo(*args, **kwargs):
 socket.getaddrinfo = new_getaddrinfo
 
 # --- PATH CONFIGURATION (Docker Fix) ---
+# This ensures we find the client folder whether running locally or in Docker
 BASE_DIR = pathlib.Path(__file__).parent.resolve() # /app/server
 ROOT_DIR = BASE_DIR.parent                         # /app
 CLIENT_DIR = ROOT_DIR / "client"                   # /app/client
@@ -63,6 +65,7 @@ except Exception as e:
     security_monitor = SecurityMonitor()
 
 # Load environment variables
+# Try to load from .docker.env in parent directory, then .env in current directory
 load_dotenv(dotenv_path="../.docker.env")
 load_dotenv()  # This will override with .env if it exists in server directory
 
@@ -74,6 +77,7 @@ ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "1"))
 
 # AES encryption configuration
+# Ensure AES keys are the correct length (32 bytes for key, 16 bytes for IV)
 _aes_key_str = os.getenv("AES_SECRET_KEY", "your-32-character-aes-secret-key-here")
 _aes_iv_str = os.getenv("AES_IV", "your-16-character-iv-here")
 
@@ -97,6 +101,9 @@ AES_IV = _aes_iv_str.encode()
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "chat_app")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "users")
+
+# Email/SMTP configuration (Legacy/Fallback)
+# SMTP_USER variables are removed to prevent conflicts with n8n logic
 
 # MongoDB client
 mongodb_client = None
@@ -183,6 +190,7 @@ class SessionValidation(BaseModel):
 def encrypt_message(message: str) -> str:
     """Encrypt a message using AES-256-CBC"""
     try:
+        # Create cipher
         cipher = Cipher(
             algorithms.AES(AES_SECRET_KEY),
             modes.CBC(AES_IV),
@@ -275,11 +283,12 @@ def generate_otp() -> str:
     """Generate a 6-digit OTP code"""
     return str(random.randint(100000, 999999))
 
-# --- REPLACED EMAIL FUNCTION WITH N8N WEBHOOK ---
+# --- UPDATED OTP FUNCTION FOR N8N AUTOMATION ---
 async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> bool:
-    """Send OTP via n8n Webhook (Automated)"""
+    """Send OTP via n8n Webhook"""
     
-    # 1. Always log to console (Fail-safe for debugging/fallback)
+    # 1. Always log to console (Fail-safe)
+    # This ensures you can see the OTP in Render Logs even if n8n fails
     print(f"\n{'='*60}")
     print(f"🚀 TRIGGERING N8N OTP")
     print(f"To: {email}")
@@ -314,13 +323,14 @@ async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> 
             method='POST'
         )
         
+        # 10 second timeout for webhook
         with urllib.request.urlopen(req, timeout=10) as response:
             if 200 <= response.status < 300:
                 print(f"✅ n8n Webhook triggered successfully for {email}")
                 return True
             else:
                 print(f"❌ n8n returned status: {response.status}")
-                # Return True anyway so user can use console code
+                # Return True anyway so console code works
                 return True
                 
     except Exception as e:
@@ -596,11 +606,11 @@ async def startup_event():
     print(f"   - AES Encryption: {'Enabled' if len(AES_SECRET_KEY) == 32 else 'Warning: Key length incorrect'}")
     print(f"   - Password Hashing: bcrypt enabled")
     print(f"   - QR Token Security: AES encrypted + 1-minute expiry")
-    print(f"   - OTP System: {'✅ Enabled (SMTP configured)' if SMTP_USER and SMTP_PASSWORD else '⚠️  Development Mode (console output)'}")
-    if SMTP_USER and SMTP_PASSWORD:
-        print(f"   - SMTP Server: {SMTP_HOST}:{SMTP_PORT}")
-        print(f"   - SMTP User: {SMTP_USER}")
-        print(f"   - Email From: {SMTP_FROM_NAME}")
+    
+    # --- FIXED OTP STATUS CHECK ---
+    n8n_status = '✅ Automated (n8n Webhook)' if os.getenv('N8N_WEBHOOK_URL') else '⚠️  Development Mode (console output)'
+    print(f"   - OTP System: {n8n_status}")
+    
     print(f"\n🚀 Server is running at http://localhost:8000")
     print(f"📱 Access the app at http://localhost:8000/static/index.html\n")
 
@@ -776,13 +786,8 @@ async def send_signup_otp(request: OTPRequest):
     
     # Generate and send OTP
     otp_code = generate_otp()
-    email_sent = await send_email_otp(email, otp_code, "signup")
-    
-    if not email_sent:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send OTP email. Please try again later."
-        )
+    # Calls our new N8N function
+    await send_email_otp(email, otp_code, "signup")
     
     # Store OTP (also store password temporarily for signup completion)
     await store_otp(email, otp_code, "signup")
@@ -908,13 +913,7 @@ async def send_forgot_otp(request: OTPRequest):
     
     # Generate and send OTP
     otp_code = generate_otp()
-    email_sent = await send_email_otp(email, otp_code, "forgot_password")
-    
-    if not email_sent:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send OTP email. Please try again later."
-        )
+    await send_email_otp(email, otp_code, "forgot_password")
     
     # Store OTP
     await store_otp(email, otp_code, "forgot_password")
@@ -1655,13 +1654,13 @@ async def test_otp_email(email: str = Query(..., description="Email address to t
                 "success": True,
                 "message": f"Test OTP email sent successfully to {email}",
                 "otp_code": test_otp,  # Only for testing - remove in production
-                "smtp_configured": bool(SMTP_USER and SMTP_PASSWORD)
+                "smtp_configured": True  # Simplified for n8n
             }
         else:
             return {
                 "success": False,
                 "message": "Failed to send test email",
-                "smtp_configured": bool(SMTP_USER and SMTP_PASSWORD)
+                "smtp_configured": False
             }
     except Exception as e:
         raise HTTPException(
