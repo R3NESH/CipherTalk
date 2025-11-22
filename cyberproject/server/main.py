@@ -102,9 +102,6 @@ MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "chat_app")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "users")
 
-# Email/SMTP configuration (Legacy/Fallback)
-# SMTP_USER variables are removed to prevent conflicts with n8n logic
-
 # MongoDB client
 mongodb_client = None
 mongodb_connected = False
@@ -283,12 +280,11 @@ def generate_otp() -> str:
     """Generate a 6-digit OTP code"""
     return str(random.randint(100000, 999999))
 
-# --- UPDATED OTP FUNCTION FOR N8N AUTOMATION ---
+# --- OTP FUNCTION FOR N8N AUTOMATION ---
 async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> bool:
     """Send OTP via n8n Webhook"""
     
     # 1. Always log to console (Fail-safe)
-    # This ensures you can see the OTP in Render Logs even if n8n fails
     print(f"\n{'='*60}")
     print(f"🚀 TRIGGERING N8N OTP")
     print(f"To: {email}")
@@ -323,14 +319,13 @@ async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> 
             method='POST'
         )
         
-        # 10 second timeout for webhook
         with urllib.request.urlopen(req, timeout=10) as response:
             if 200 <= response.status < 300:
                 print(f"✅ n8n Webhook triggered successfully for {email}")
                 return True
             else:
                 print(f"❌ n8n returned status: {response.status}")
-                # Return True anyway so console code works
+                # Return True anyway so user can use console code
                 return True
                 
     except Exception as e:
@@ -1403,13 +1398,28 @@ async def websocket_room_endpoint(websocket: WebSocket, session_id: str, token: 
             try:
                 message_data = json.loads(data)
                 user = message_data.get("user", user_email)
-                message = message_data.get("message", "")
                 
-                # Security monitoring - analyze message for threats
+                # 1. GET THE RAW MESSAGE
+                # If your client sends Plaintext (and server encrypts), this is plain.
+                # If your client sends Ciphertext (E2E), this is encrypted.
+                raw_msg = message_data.get("message", "")
+                
+                # 2. DETERMINE PLAINTEXT FOR ML
+                # We try to decrypt it. If it's already plain, we use it as is.
+                try:
+                    # Attempt to decrypt to see if it's a valid ciphertext
+                    plaintext_for_ml = decrypt_message(raw_msg)
+                    # If decryption returns the same string (because it failed safely), it implies it wasn't valid ciphertext (so likely plaintext)
+                except:
+                    plaintext_for_ml = raw_msg
+
+                # 3. RUN SECURITY MONITOR ON PLAINTEXT
+                # We pass the DECRYPTED text to the ML model
                 try:
                     # Check if security_monitor is available and has the analyze_message method
                     if security_monitor and hasattr(security_monitor, 'analyze_message'):
-                        warnings = security_monitor.analyze_message(user_email, session_id, message)
+                        # Use the DECRYPTED text here!
+                        warnings = security_monitor.analyze_message(user_email, session_id, plaintext_for_ml)
                         
                         # Add warnings to user's record
                         for warning in warnings:
@@ -1447,15 +1457,26 @@ async def websocket_room_endpoint(websocket: WebSocket, session_id: str, token: 
                 except Exception as sec_error:
                     print(f"⚠️  Security monitoring error: {sec_error}")
                 
-                encrypted_message = encrypt_message(message)
+                # 4. PREPARE MESSAGE FOR BROADCAST
+                # We ensure the message sent to the room is ENCRYPTED.
+                # simple check: if the raw_msg == plaintext_for_ml, it wasn't encrypted yet.
+                
+                if raw_msg != plaintext_for_ml:
+                    # Input was encrypted (since decrypt changed it). Broadcast as is.
+                    final_broadcast_msg = raw_msg
+                else:
+                    # Input was plain (or failed decrypt). Encrypt it.
+                    final_broadcast_msg = encrypt_message(raw_msg)
+
                 response = {
                     "user": user,
-                    "message": encrypted_message,
+                    "message": final_broadcast_msg, # Send Encrypted
                     "encrypted": True,
                     "timestamp": datetime.utcnow().isoformat(),
                     "security_info": "Message encrypted with AES-256-CBC"
                 }
                 await manager.broadcast(session_id, response)
+                
             except json.JSONDecodeError:
                 error_msg = "Invalid message format. Please send JSON with 'user' and 'message' fields."
                 encrypted_error = encrypt_message(error_msg)
@@ -1654,13 +1675,13 @@ async def test_otp_email(email: str = Query(..., description="Email address to t
                 "success": True,
                 "message": f"Test OTP email sent successfully to {email}",
                 "otp_code": test_otp,  # Only for testing - remove in production
-                "smtp_configured": True  # Simplified for n8n
+                "smtp_configured": bool(SMTP_USER and SMTP_PASSWORD)
             }
         else:
             return {
                 "success": False,
                 "message": "Failed to send test email",
-                "smtp_configured": False
+                "smtp_configured": bool(SMTP_USER and SMTP_PASSWORD)
             }
     except Exception as e:
         raise HTTPException(
