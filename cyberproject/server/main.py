@@ -25,6 +25,8 @@ import base64
 from dotenv import load_dotenv
 import pathlib
 import socket
+
+# --- FORCE IPv4 FIX ---
 old_getaddrinfo = socket.getaddrinfo
 def new_getaddrinfo(*args, **kwargs):
     responses = old_getaddrinfo(*args, **kwargs)
@@ -32,7 +34,6 @@ def new_getaddrinfo(*args, **kwargs):
 socket.getaddrinfo = new_getaddrinfo
 
 # --- PATH CONFIGURATION (Docker Fix) ---
-# This ensures we find the client folder whether running locally or in Docker
 BASE_DIR = pathlib.Path(__file__).parent.resolve() # /app/server
 ROOT_DIR = BASE_DIR.parent                         # /app
 CLIENT_DIR = ROOT_DIR / "client"                   # /app/client
@@ -61,7 +62,6 @@ except Exception as e:
     security_monitor = SecurityMonitor()
 
 # Load environment variables
-# Try to load from .docker.env in parent directory, then .env in current directory
 load_dotenv(dotenv_path="../.docker.env")
 load_dotenv()  # This will override with .env if it exists in server directory
 
@@ -73,7 +73,6 @@ ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "1"))
 
 # AES encryption configuration
-# Ensure AES keys are the correct length (32 bytes for key, 16 bytes for IV)
 _aes_key_str = os.getenv("AES_SECRET_KEY", "your-32-character-aes-secret-key-here")
 _aes_iv_str = os.getenv("AES_IV", "your-16-character-iv-here")
 
@@ -190,7 +189,6 @@ class SessionValidation(BaseModel):
 def encrypt_message(message: str) -> str:
     """Encrypt a message using AES-256-CBC"""
     try:
-        # Create cipher
         cipher = Cipher(
             algorithms.AES(AES_SECRET_KEY),
             modes.CBC(AES_IV),
@@ -285,17 +283,18 @@ def generate_otp() -> str:
 
 async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> bool:
     """Send OTP via email using SMTP"""
+    # --- CRITICAL MODIFICATION FOR RENDER ---
+    # ALWAYS print the OTP to console first so you can see it in Logs
+    print(f"\n{'='*60}")
+    print(f"🔑 DEBUG: RENDER OTP GENERATED")
+    print(f"To: {email}")
+    print(f"Code: {otp_code}")
+    print(f"{'='*60}\n")
+    
     try:
-        # If SMTP is not configured, print to console (for development)
+        # If SMTP is not configured, just return True (Dev Mode)
         if not SMTP_USER or not SMTP_PASSWORD:
-            print(f"\n{'='*60}")
-            print(f"📧 OTP Email (SMTP not configured - Development Mode)")
-            print(f"{'='*60}")
-            print(f"To: {email}")
-            print(f"Purpose: {purpose}")
-            print(f"OTP Code: {otp_code}")
-            print(f"Expires in: 5 minutes")
-            print(f"{'='*60}\n")
+            print("ℹ️ SMTP not configured. Running in Dev Mode.")
             return True
         
         # Create email message
@@ -350,22 +349,7 @@ async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> 
         </html>
         """
         
-        text_body = f"""
-        Private Chat Verification Code
-        
-        Hello,
-        
-        You requested to {action_text}. Use the verification code below:
-        
-        {otp_code}
-        
-        This code will expire in 5 minutes.
-        
-        If you didn't request this code, please ignore this email.
-        
-        Best regards,
-        Private Chat Team
-        """
+        text_body = f"Your OTP Code is: {otp_code}"
         
         # Attach both plain text and HTML versions
         part1 = MIMEText(text_body, 'plain')
@@ -374,7 +358,6 @@ async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> 
         msg.attach(part2)
         
         # Send email via SMTP
-        # Remove spaces from password if present (Google App Passwords sometimes have spaces)
         password_clean = SMTP_PASSWORD.replace(" ", "")
         
         try:
@@ -385,24 +368,17 @@ async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> 
             
             print(f"✅ OTP email sent successfully to {email}")
             return True
-        except smtplib.SMTPAuthenticationError as e:
-            print(f"❌ SMTP Authentication failed: {str(e)}")
-            print(f"   Check your SMTP_USER and SMTP_PASSWORD in .docker.env")
-            print(f"   For Gmail, make sure you're using an App Password, not your regular password")
-            return False
-        except smtplib.SMTPException as e:
-            print(f"❌ SMTP Error: {str(e)}")
-            return False
         except Exception as e:
-            print(f"❌ Failed to send OTP email to {email}: {str(e)}")
-            return False
+            # --- FAIL SAFE MODE ---
+            # If email fails (timeout/auth/network), print error but return TRUE
+            # This allows you to use the OTP printed in console to login anyway
+            print(f"❌ SMTP Error: {str(e)}")
+            print(f"⚠️  Email failed but OTP was generated. Check console logs above.")
+            return True
         
     except Exception as e:
-        print(f"❌ Failed to send OTP email to {email}: {str(e)}")
-        # In development, still return True if SMTP fails but we printed to console
-        if not SMTP_USER or not SMTP_PASSWORD:
-            return True
-        return False
+        print(f"❌ General Error: {str(e)}")
+        return True # Always return True so UI doesn't block
 
 async def store_otp(email: str, otp_code: str, purpose: str) -> bool:
     """Store OTP in MongoDB or in-memory storage"""
