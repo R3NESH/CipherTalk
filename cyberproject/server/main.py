@@ -128,6 +128,7 @@ class RoomConnectionManager:
                 except: pass
 
 manager = RoomConnectionManager()
+# SESSIONS dict is kept for local fallback, but MongoDB is preferred
 SESSIONS: Dict[str, dict] = {}
 
 # Models
@@ -304,6 +305,10 @@ async def close_mongo_connection():
 def get_user_collection(): return mongodb_client[DATABASE_NAME][COLLECTION_NAME]
 def get_qr_tokens_collection(): return mongodb_client[DATABASE_NAME]["qr_tokens"]
 def get_otps_collection(): return mongodb_client[DATABASE_NAME]["otps"]
+# NEW: Helper for session persistence
+def get_sessions_collection():
+    if mongodb_client is None: raise RuntimeError("MongoDB not connected")
+    return mongodb_client[DATABASE_NAME]["sessions"]
 
 def hash_password(password: str, rounds: int = 12) -> str:
     return bcrypt.hash(password, rounds=rounds)
@@ -328,6 +333,10 @@ async def startup_event():
     try:
         await connect_to_mongo()
         mongodb_connected = True
+        # Index for sessions to expire them automatically after 24 hours if needed (optional)
+        try:
+            await get_sessions_collection().create_index("created_at", expireAfterSeconds=86400)
+        except: pass
         print("✅ MongoDB connected successfully")
     except Exception as e:
         mongodb_connected = False
@@ -462,13 +471,70 @@ async def chat(message: ChatMessage):
 @app.post("/create_session")
 async def create_session():
     sid = uuid4().hex
-    SESSIONS[sid] = {"created_at": datetime.utcnow().isoformat()}
+    created_at = datetime.utcnow().isoformat()
+    
+    # Store session in MongoDB
+    if mongodb_connected:
+        try:
+            await get_sessions_collection().insert_one({"session_id": sid, "created_at": created_at})
+        except: pass
+    else:
+        SESSIONS[sid] = {"created_at": created_at}
+        
     return {"session_id": sid, "join_url": f"/static/chat.html?session_id={sid}"}
+
+@app.get("/qr_from_session/{session_id}")
+async def qr_from_session(session_id: str):
+    # Validate session exists (DB Fallback)
+    session_exists = False
+    if mongodb_connected:
+        try:
+            if await get_sessions_collection().find_one({"session_id": session_id}):
+                session_exists = True
+        except: pass
+    
+    if not session_exists and session_id in SESSIONS:
+        session_exists = True
+        
+    if not session_exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    # Encode a full join URL for sharing (client will request relative path)
+    join_url = f"/static/chat.html?session_id={session_id}"
+    try:
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(join_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        img_buffer = io.BytesIO()
+        img.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        return Response(content=img_buffer.getvalue(), media_type="image/png")
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate QR code")
 
 @app.websocket("/ws/{session_id}")
 async def websocket_room_endpoint(websocket: WebSocket, session_id: str, token: str = Query(...)):
     user_email = verify_token(token)
-    if not user_email or session_id not in SESSIONS:
+    
+    # Validate session (DB Fallback)
+    session_exists = False
+    if mongodb_connected:
+        try:
+            if await get_sessions_collection().find_one({"session_id": session_id}):
+                session_exists = True
+        except: pass
+    
+    if not session_exists and session_id in SESSIONS:
+        session_exists = True
+
+    if not user_email:
+        print(f"WS REJECT: Invalid Token for {session_id}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    
+    if not session_exists:
+        print(f"WS REJECT: Session Not Found {session_id}")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
