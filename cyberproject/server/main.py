@@ -25,6 +25,7 @@ import base64
 from dotenv import load_dotenv
 import pathlib
 import socket
+import urllib.request # <--- Added for n8n Webhook
 
 # --- FORCE IPv4 FIX ---
 old_getaddrinfo = socket.getaddrinfo
@@ -96,13 +97,6 @@ AES_IV = _aes_iv_str.encode()
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "chat_app")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "users")
-
-# Email/SMTP configuration
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Private Chat")
 
 # MongoDB client
 mongodb_client = None
@@ -281,104 +275,58 @@ def generate_otp() -> str:
     """Generate a 6-digit OTP code"""
     return str(random.randint(100000, 999999))
 
+# --- REPLACED EMAIL FUNCTION WITH N8N WEBHOOK ---
 async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> bool:
-    """Send OTP via email using SMTP"""
-    # --- CRITICAL MODIFICATION FOR RENDER ---
-    # ALWAYS print the OTP to console first so you can see it in Logs
+    """Send OTP via n8n Webhook (Automated)"""
+    
+    # 1. Always log to console (Fail-safe for debugging/fallback)
     print(f"\n{'='*60}")
-    print(f"🔑 DEBUG: RENDER OTP GENERATED")
+    print(f"🚀 TRIGGERING N8N OTP")
     print(f"To: {email}")
     print(f"Code: {otp_code}")
     print(f"{'='*60}\n")
+
+    # 2. Get n8n URL from environment variables
+    n8n_url = os.getenv("N8N_WEBHOOK_URL")
+    
+    if not n8n_url:
+        print("⚠️  N8N_WEBHOOK_URL not set. OTP printed to console only.")
+        return True # Return True so the user can still log in using console code
+
+    # 3. Prepare the data payload
+    payload = {
+        "email": email,
+        "otp_code": otp_code,
+        "purpose": purpose,
+        "timestamp": datetime.utcnow().isoformat()
+    }
     
     try:
-        # If SMTP is not configured, just return True (Dev Mode)
-        if not SMTP_USER or not SMTP_PASSWORD:
-            print("ℹ️ SMTP not configured. Running in Dev Mode.")
-            return True
+        # 4. Send POST request to n8n
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            n8n_url, 
+            data=data, 
+            headers={
+                'Content-Type': 'application/json',
+                'User-Agent': 'SecureChatApp/1.0'
+            },
+            method='POST'
+        )
         
-        # Create email message
-        msg = MIMEMultipart('alternative')
-        msg['From'] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
-        msg['To'] = email
-        msg['Subject'] = "Your Private Chat Verification Code"
-        
-        # Email body (HTML)
-        if purpose == "signup":
-            subject_text = "Verify your email address"
-            action_text = "complete your account registration"
-        else:
-            subject_text = "Reset your password"
-            action_text = "reset your password"
-        
-        html_body = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ background: linear-gradient(135deg, #4da6ff 0%, #0066ff 100%); color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0; }}
-                .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
-                .otp-code {{ font-size: 32px; font-weight: bold; color: #0066ff; text-align: center; padding: 20px; background: white; border-radius: 8px; margin: 20px 0; letter-spacing: 8px; }}
-                .footer {{ text-align: center; margin-top: 20px; color: #666; font-size: 12px; }}
-                .warning {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin: 15px 0; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🔐 Private Chat</h1>
-                </div>
-                <div class="content">
-                    <h2>{subject_text}</h2>
-                    <p>Hello,</p>
-                    <p>You requested to {action_text}. Use the verification code below:</p>
-                    <div class="otp-code">{otp_code}</div>
-                    <p>This code will expire in <strong>5 minutes</strong>.</p>
-                    <div class="warning">
-                        <strong>⚠️ Security Notice:</strong> If you didn't request this code, please ignore this email.
-                    </div>
-                    <p>Best regards,<br>Private Chat Team</p>
-                </div>
-                <div class="footer">
-                    <p>This is an automated message. Please do not reply to this email.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
-        
-        text_body = f"Your OTP Code is: {otp_code}"
-        
-        # Attach both plain text and HTML versions
-        part1 = MIMEText(text_body, 'plain')
-        part2 = MIMEText(html_body, 'html')
-        msg.attach(part1)
-        msg.attach(part2)
-        
-        # Send email via SMTP
-        password_clean = SMTP_PASSWORD.replace(" ", "")
-        
-        try:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-                server.starttls()
-                server.login(SMTP_USER, password_clean)
-                server.send_message(msg)
-            
-            print(f"✅ OTP email sent successfully to {email}")
-            return True
-        except Exception as e:
-            # --- FAIL SAFE MODE ---
-            # If email fails (timeout/auth/network), print error but return TRUE
-            # This allows you to use the OTP printed in console to login anyway
-            print(f"❌ SMTP Error: {str(e)}")
-            print(f"⚠️  Email failed but OTP was generated. Check console logs above.")
-            return True
-        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if 200 <= response.status < 300:
+                print(f"✅ n8n Webhook triggered successfully for {email}")
+                return True
+            else:
+                print(f"❌ n8n returned status: {response.status}")
+                # Return True anyway so user can use console code
+                return True
+                
     except Exception as e:
-        print(f"❌ General Error: {str(e)}")
-        return True # Always return True so UI doesn't block
+        print(f"❌ Failed to trigger n8n: {str(e)}")
+        # Return True anyway so user can use console code
+        return True
 
 async def store_otp(email: str, otp_code: str, purpose: str) -> bool:
     """Store OTP in MongoDB or in-memory storage"""
