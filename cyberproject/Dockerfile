@@ -1,25 +1,35 @@
-# Use an official Python runtime as a parent image
+# Use official Python runtime
 FROM python:3.10-slim
 
-# Set the working directory inside the container
+# Set working directory
 WORKDIR /app
 
-# Copy only the requirements file to leverage Docker cache
+# 1. Install system dependencies required for CatBoost (libgomp1 is mandatory)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Copy requirements and install dependencies
 COPY server/requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --upgrade pip setuptools wheel && pip install --prefer-binary -r requirements.txt
+# 3. Copy the application folders
+COPY server /app/server
+COPY mlmodel /app/mlmodel
+COPY client /app/client
 
-# Copy the server source code into the container
-COPY ./server /app/server
+# 4. Set Python path so 'server' modules can talk to each other
+ENV PYTHONPATH=/app/server
 
-# Copy the machine learning model into the container
-# This ensures the relative path ../mlmodel in ml_detector.py works correctly
-COPY ./mlmodel /app/mlmodel
+# 5. (Optional) Run your test script during build to catch errors early
+# If this fails, the deployment will stop (saving you debugging time)
+RUN python /app/server/test_startup.py
 
-# Make port 8000 available to the world outside this container
+# Expose the port
 EXPOSE 8000
 
-# Run the app. Use 0.0.0.0 to make it accessible from the host.
-# The entry point is the 'app' object in 'server/main.py'
-CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 6. Start the application
+# Note: We point to "server.main:app" because main.py is inside the server folder
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
