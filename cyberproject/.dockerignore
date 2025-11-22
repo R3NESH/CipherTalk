@@ -1,19 +1,39 @@
-# Git
-.git
-.gitignore
-
-# Python virtual environment
-.venv
-venv/
-
-# Python cache
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 
-# IDE/Editor folders
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Secrets & credentials (NEVER commit these)
+.env
+.env.local
+secrets/
+*.key
+*.pem
+
+# Ignore all pickle files EXCEPT the phishing model
+*.pkl
+!mlmodel/catboost_phishing.pkl
+
+# IDEs
 .vscode/
 .idea/
-
-# Local files
-.env
+*.swp
+.DS_Store
