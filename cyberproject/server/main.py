@@ -24,6 +24,12 @@ from cryptography.hazmat.primitives import padding
 import base64
 from dotenv import load_dotenv
 import pathlib
+import socket
+old_getaddrinfo = socket.getaddrinfo
+def new_getaddrinfo(*args, **kwargs):
+    responses = old_getaddrinfo(*args, **kwargs)
+    return [response for response in responses if response[0] == socket.AF_INET]
+socket.getaddrinfo = new_getaddrinfo
 
 # --- PATH CONFIGURATION (Docker Fix) ---
 # This ensures we find the client folder whether running locally or in Docker
