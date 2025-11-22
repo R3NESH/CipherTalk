@@ -1,0 +1,69 @@
+{
+  "name": "My workflow 2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "send-otp",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        224,
+        16
+      ],
+      "id": "0b26162f-2377-451a-a238-364d6797a2b5",
+      "name": "Webhook",
+      "webhookId": "970f5772-b300-469f-bb3a-46f4f2a29cce"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.body.email }}",
+        "subject": "Secure Chat Verification Code",
+        "message": "={{ 'Your login code is: ' + $json.body.otp_code }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        432,
+        16
+      ],
+      "id": "0b6bfbc8-6666-4197-b123-04ac778165dd",
+      "name": "Send a message",
+      "webhookId": "83d9d07a-8716-49d4-977c-e8cb0d605e03",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1HyNmDPNIva5EWD3",
+          "name": "Gmail account 4"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a0327ef4-bd95-4e48-9151-c26593d708a1",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a3b4ac73a3ad547a246207e17d4487bb6f91a7d63804db272f602b06738b3c33"
+  },
+  "id": "khRlBKT4VtbXECWd",
+  "tags": []
+}
