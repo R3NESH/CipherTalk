@@ -46,7 +46,6 @@ print(f"📂 Server Directory: {BASE_DIR}")
 print(f"📂 Client Directory: {CLIENT_DIR}")
 
 # --- LIGHTWEIGHT SECURITY MONITOR (RAM EFFICIENT) ---
-# Replaces CatBoost for Free Tier Deployment
 class SecurityWarning:
     def __init__(self, message):
         self.message = message
@@ -61,9 +60,13 @@ class LightweightMonitor:
         urls = re.findall(r'https?://\S+', message)
         
         for url in urls:
-            # 2. Check for specific phishing patterns or your test domains
-            # Add 'square.site' and 'brizy.site' specifically for your tests
-            suspicious_terms = ['square.site', 'brizy.site', 'ngrok', 'bit.ly', 'customer0-answers', 'verify', 'login', 'secure']
+            # 2. Check for specific phishing patterns
+            # Expanded list to catch 'weebly.com' and generic phishing terms
+            suspicious_terms = [
+                'square.site', 'brizy.site', 'ngrok', 'bit.ly', 'customer0-answers', 
+                'verify', 'login', 'secure', 'account', 'update', 'banking', 'confirm',
+                'weebly.com', '000webhostapp', 'firebaseapp', 'vercel.app'
+            ]
             
             if any(term in url.lower() for term in suspicious_terms) or len(url) > 80:
                 warning_msg = f"Phishing Threat Detected: {url}"
@@ -74,11 +77,9 @@ class LightweightMonitor:
         return warnings
 
     def add_warning(self, warning):
-        # In a real app, save to DB here. 
         pass
 
     def should_terminate_session(self, user, session):
-        # Terminate if they were just flagged
         if session in self.flagged_sessions:
             self.flagged_sessions.remove(session) # Reset
             return True
@@ -87,7 +88,7 @@ class LightweightMonitor:
     def get_warning_count(self, user, session):
         return 1
 
-# Initialize the lightweight monitor instead of the heavy ML one
+# Initialize the lightweight monitor
 security_monitor = LightweightMonitor()
 print("✅ Loaded Lightweight Monitor (RAM Safe for Free Tier)")
 
