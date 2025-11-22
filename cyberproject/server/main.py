@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, status, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response, FileResponse, JSONResponse
 from pydantic import BaseModel, EmailStr
 from passlib.hash import bcrypt
 from typing import Dict, List, Optional
@@ -23,6 +23,16 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 import base64
 from dotenv import load_dotenv
+import pathlib
+
+# --- PATH CONFIGURATION (Docker Fix) ---
+# This ensures we find the client folder whether running locally or in Docker
+BASE_DIR = pathlib.Path(__file__).parent.resolve() # /app/server
+ROOT_DIR = BASE_DIR.parent                         # /app
+CLIENT_DIR = ROOT_DIR / "client"                   # /app/client
+
+print(f"📂 Server Directory: {BASE_DIR}")
+print(f"📂 Client Directory: {CLIENT_DIR}")
 
 # Import security_monitor with error handling
 try:
@@ -678,41 +688,46 @@ app.add_middleware(
 )
 
 # Mount static files
-# Try to find client directory relative to server directory or current working directory
-try:
-    import pathlib
-    client_dir = pathlib.Path(__file__).parent.parent / "client"
-    if not client_dir.exists():
-        # Try current working directory (for Render deployment)
-        client_dir = pathlib.Path.cwd() / "client"
-    if not client_dir.exists():
-        # Try from server directory
-        client_dir = pathlib.Path(__file__).parent / ".." / "client"
-        client_dir = client_dir.resolve()
-    if client_dir.exists():
-        app.mount("/static", StaticFiles(directory=str(client_dir)), name="static")
-        print(f"✅ Static files mounted from: {client_dir}")
-    else:
-        print("⚠️  Warning: Client directory not found. Static files will not be served.")
-        print(f"   Searched in: {pathlib.Path(__file__).parent.parent / 'client'}")
-        print(f"   Searched in: {pathlib.Path.cwd() / 'client'}")
-except Exception as e:
-    print(f"⚠️  Warning: Could not mount static files: {e}")
+# Updated to use the robust CLIENT_DIR from the path configuration
+if CLIENT_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(CLIENT_DIR)), name="static")
+    print(f"✅ Static files mounted from: {CLIENT_DIR}")
+else:
+    print("⚠️  Warning: Client directory not found. Static files will not be served.")
+    print(f"   Expected path: {CLIENT_DIR}")
 
-# Root endpoint
+# Root endpoint - Updated to serve index.html
 @app.get("/")
 async def root():
-    return {"message": "Secure Chat Server Running", "security": "AES-256 + bcrypt + JWT enabled"}
+    index_file = CLIENT_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return {"message": "Secure Chat Server Running", "security": "AES-256 + bcrypt + JWT enabled", "note": "index.html not found in client dir"}
 
 # Favicon endpoint to prevent 404 errors
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)  # No Content - silently ignore favicon requests
 
+# Generic HTML serving endpoint - Updated to use CLIENT_DIR
+@app.get("/{page_name}.html")
+async def read_html(page_name: str):
+    # Security: prevent directory traversal
+    if ".." in page_name or "/" in page_name:
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+    
+    file_path = CLIENT_DIR / f"{page_name}.html"
+    if file_path.exists():
+        return FileResponse(file_path)
+    return JSONResponse(content={"error": "Page not found"}, status_code=404)
+
 # QR Validation page
 @app.get("/qr-validate")
 async def qr_validate_page():
-    return FileResponse("../client/qr_validate.html")
+    file_path = CLIENT_DIR / "qr_validate.html"
+    if file_path.exists():
+        return FileResponse(file_path)
+    return JSONResponse(content={"error": "qr_validate.html not found"}, status_code=404)
 
 # Signup endpoint with enhanced bcrypt security
 @app.post("/signup")
@@ -1307,7 +1322,8 @@ async def generate_qrcode(user_email: str = Query(..., description="User email f
             )
         
         # Store token in MongoDB with expiry
-        qr_tokens_collection = get_qr_tokens_collection()
+        qr_tokens_collection = get_qr_tokens_collection() if mongodb_connected else None
+        
         token_doc = {
             "token": encrypted_token,
             "user_email": user_email,
@@ -1316,7 +1332,8 @@ async def generate_qrcode(user_email: str = Query(..., description="User email f
             "used": False
         }
         
-        await qr_tokens_collection.insert_one(token_doc)
+        if qr_tokens_collection:
+            await qr_tokens_collection.insert_one(token_doc)
         
         # Generate QR code with encrypted token (not raw email)
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
@@ -1354,23 +1371,24 @@ async def validate_qr_token_endpoint(qr_token: QRToken):
             )
         
         # Check if token exists in MongoDB and hasn't been used
-        qr_tokens_collection = get_qr_tokens_collection()
-        token_doc = await qr_tokens_collection.find_one({
-            "token": qr_token.token,
-            "used": False
-        })
-        
-        if not token_doc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Token not found or already used"
+        if mongodb_connected:
+            qr_tokens_collection = get_qr_tokens_collection()
+            token_doc = await qr_tokens_collection.find_one({
+                "token": qr_token.token,
+                "used": False
+            })
+            
+            if not token_doc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Token not found or already used"
+                )
+            
+            # Mark token as used
+            await qr_tokens_collection.update_one(
+                {"token": qr_token.token},
+                {"$set": {"used": True, "used_at": datetime.utcnow()}}
             )
-        
-        # Mark token as used
-        await qr_tokens_collection.update_one(
-            {"token": qr_token.token},
-            {"$set": {"used": True, "used_at": datetime.utcnow()}}
-        )
         
         # Generate JWT token for the user
         user_email = validation_result["user_email"]
@@ -1426,7 +1444,7 @@ async def qr_from_session(session_id: str):
         img_buffer.seek(0)
         return Response(content=img_buffer.getvalue(), media_type="image/png")
     except Exception:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate QR code")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate QR code")
 
 @app.websocket("/ws/{session_id}")
 async def websocket_room_endpoint(websocket: WebSocket, session_id: str, token: str = Query(...)):
@@ -1460,48 +1478,45 @@ async def websocket_room_endpoint(websocket: WebSocket, session_id: str, token: 
                 
                 # Security monitoring - analyze message for threats
                 try:
-                    warnings = security_monitor.analyze_message(user_email, session_id, message)
-                    
-                    # Add warnings to user's record
-                    for warning in warnings:
-                        security_monitor.add_warning(warning)
-                    
-                    # Check if session should be terminated
-                    should_terminate = security_monitor.should_terminate_session(user_email, session_id)
+                    # Check if security_monitor is available and has the analyze_message method
+                    if security_monitor and hasattr(security_monitor, 'analyze_message'):
+                        warnings = security_monitor.analyze_message(user_email, session_id, message)
+                        
+                        # Add warnings to user's record
+                        for warning in warnings:
+                            security_monitor.add_warning(warning)
+                        
+                        # Check if session should be terminated
+                        should_terminate = security_monitor.should_terminate_session(user_email, session_id)
+                        
+                        if should_terminate:
+                            termination_msg = "Session terminated due to security violations."
+                            encrypted_termination = encrypt_message(termination_msg)
+                            await websocket.send_json({
+                                "user": "Security System",
+                                "message": encrypted_termination,
+                                "encrypted": True,
+                                "security_info": "Session terminated due to multiple security warnings",
+                                "terminated": True
+                            })
+                            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                            return
+                        
+                        # Send warning messages if any
+                        for warning in warnings:
+                            warning_msg = f"Security Warning: {warning.message}"
+                            encrypted_warning = encrypt_message(warning_msg)
+                            warning_count = security_monitor.get_warning_count(user_email, session_id) if hasattr(security_monitor, 'get_warning_count') else 0
+                            max_warnings = security_monitor.max_warnings_before_ban if hasattr(security_monitor, 'max_warnings_before_ban') else 3
+                            await websocket.send_json({
+                                "user": "Security System",
+                                "message": encrypted_warning,
+                                "encrypted": True,
+                                "security_info": f"Warning {warning_count}/{max_warnings}",
+                                "warning": True
+                            })
                 except Exception as sec_error:
                     print(f"⚠️  Security monitoring error: {sec_error}")
-                    warnings = []
-                    should_terminate = False
-                
-                if should_terminate:
-                    termination_msg = "Session terminated due to security violations."
-                    encrypted_termination = encrypt_message(termination_msg)
-                    await websocket.send_json({
-                        "user": "Security System",
-                        "message": encrypted_termination,
-                        "encrypted": True,
-                        "security_info": "Session terminated due to multiple security warnings",
-                        "terminated": True
-                    })
-                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                    return
-                
-                # Send warning messages if any
-                try:
-                    for warning in warnings:
-                        warning_msg = f"Security Warning: {warning.message}"
-                        encrypted_warning = encrypt_message(warning_msg)
-                        warning_count = security_monitor.get_warning_count(user_email, session_id) if hasattr(security_monitor, 'get_warning_count') else 0
-                        max_warnings = security_monitor.max_warnings_before_ban if hasattr(security_monitor, 'max_warnings_before_ban') else 3
-                        await websocket.send_json({
-                            "user": "Security System",
-                            "message": encrypted_warning,
-                            "encrypted": True,
-                            "security_info": f"Warning {warning_count}/{max_warnings}",
-                            "warning": True
-                        })
-                except Exception as warn_error:
-                    print(f"⚠️  Warning message error: {warn_error}")
                 
                 encrypted_message = encrypt_message(message)
                 response = {
