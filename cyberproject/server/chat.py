@@ -18,5 +18,3 @@ async def get_chat_history(room: str):
         {"user": "one", "text": "Hello from mock", "timestamp": "2025-01-01T00:00:00Z"},
         {"user": "two", "text": f"Welcome to room {room}", "timestamp": "2025-01-01T00:00:05Z"}
     ]
-
-
