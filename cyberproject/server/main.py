@@ -63,7 +63,6 @@ class LightweightMonitor:
         
         for url in urls:
             # 2. Check for specific phishing patterns or your test domains
-            # Expanded list based on your specific phishing examples
             suspicious_terms = [
                 # General Phishing Keywords
                 'verify', 'login', 'secure', 'account', 'update', 'banking', 'confirm', 'wallet',
@@ -150,6 +149,7 @@ in_memory_otps = {}
 in_memory_temp_passwords = {}
 in_memory_verification_tokens = {}
 in_memory_login_attempts = {}
+in_memory_chat_rate_limits = {} # New: For chat rate limiting
 
 # WebSocket connection manager
 class RoomConnectionManager:
@@ -341,6 +341,30 @@ async def check_otp_rate_limit(email: str, purpose: str) -> bool:
     else:
         return True
 
+# --- NEW: CHAT RATE LIMIT CHECKER ---
+def check_chat_rate_limit(email: str, limit: int = 30) -> bool:
+    """
+    Checks if user has sent > limit messages in the last 60 seconds.
+    Uses in-memory storage for speed in the websocket loop.
+    """
+    now = datetime.utcnow()
+    if email not in in_memory_chat_rate_limits:
+        in_memory_chat_rate_limits[email] = []
+    
+    # Keep only timestamps from the last 60 seconds
+    cutoff_time = now - timedelta(seconds=60)
+    
+    # Filter old timestamps
+    valid_timestamps = [t for t in in_memory_chat_rate_limits[email] if t > cutoff_time]
+    in_memory_chat_rate_limits[email] = valid_timestamps
+    
+    if len(valid_timestamps) >= limit:
+        return False
+    
+    # Add current message timestamp
+    in_memory_chat_rate_limits[email].append(now)
+    return True
+
 # DB Helpers
 async def connect_to_mongo():
     global mongodb_client
@@ -396,6 +420,7 @@ async def startup_event():
     
     n8n_status = '✅ Automated (n8n Webhook)' if os.getenv('N8N_WEBHOOK_URL') else '⚠️  Development Mode (console output)'
     print(f"   - OTP System: {n8n_status}")
+    print(f"   - Chat Rate Limit: 30 messages/minute")
     
     print(f"\n🚀 Server is running at http://localhost:8000")
 
@@ -1198,6 +1223,16 @@ async def websocket_room_endpoint(websocket: WebSocket, session_id: str, token: 
                 user = msg_data.get("user", user_email)
                 raw_msg = msg_data.get("message", "")
                 
+                # --- 0. RATE LIMIT CHECK ---
+                if not check_chat_rate_limit(user_email, limit=30):
+                     await websocket.send_json({
+                        "user": "System",
+                        "message": "Rate limit exceeded. You are sending messages too fast (Max 30/min).",
+                        "encrypted": False,
+                        "warning": True
+                    })
+                     continue
+
                 # --- 1. ATTEMPT DECRYPTION (FOR ML) ---
                 # We try to decrypt. If it was sent as Plaintext, decrypt returns it as-is.
                 plaintext_for_ml = decrypt_message(raw_msg)
