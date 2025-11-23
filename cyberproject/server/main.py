@@ -63,13 +63,27 @@ class LightweightMonitor:
         
         for url in urls:
             # 2. Check for specific phishing patterns or your test domains
+            # Expanded list based on your specific phishing examples
             suspicious_terms = [
+                # General Phishing Keywords
+                'verify', 'login', 'secure', 'account', 'update', 'banking', 'confirm', 'wallet',
+                
+                # Known Phishing Hosting/Domains
                 'square.site', 'brizy.site', 'ngrok', 'bit.ly', 'customer0-answers', 
-                'verify', 'login', 'secure', 'account', 'update', 'banking', 'confirm',
-                'weebly.com', '000webhostapp', 'firebaseapp', 'vercel.app'
+                'weebly.com', '000webhostapp', 'firebaseapp', 'vercel.app',
+                'duckdns.org', 'pages.dev', 'iamallama.com', 'webflow.io', 
+                'abc-paczki.cloud', 'weeblysite.com', 'cloudflare-ipfs.com', 
+                'r2.dev', 'wixsite.com', 'imsjuris.com', 'dynv6.net', 
+                'x24hr.com', 'findoutwheretogo.com', 'ureqk.com',
+                
+                # Suspicious TLDs and Shorteners
+                '.cfd', '.top', '.xyz', 't.co',
+                
+                # Docs/Presentation Phishing
+                'docs.google.com', 'drive.google.com'
             ]
             
-            if any(term in url.lower() for term in suspicious_terms) or len(url) > 80:
+            if any(term in url.lower() for term in suspicious_terms) or len(url) > 120:
                 warning_msg = f"Phishing Threat Detected: {url}"
                 warnings.append(SecurityWarning(warning_msg))
                 self.flagged_sessions.add(session)
@@ -399,123 +413,723 @@ else:
 @app.get("/")
 async def root():
     if (CLIENT_DIR / "index.html").exists(): return FileResponse(CLIENT_DIR / "index.html")
-    return {"message": "Secure Chat Server Running"}
+    return {"message": "Secure Chat Server Running", "security": "AES-256 + bcrypt + JWT enabled", "note": "index.html not found in client dir"}
 
+# Favicon endpoint to prevent 404 errors
 @app.get("/favicon.ico")
-async def favicon(): return Response(status_code=204)
+async def favicon():
+    return Response(status_code=204)  # No Content - silently ignore favicon requests
 
+# Generic HTML serving endpoint - Updated to use CLIENT_DIR
 @app.get("/{page_name}.html")
 async def read_html(page_name: str):
-    if ".." in page_name or "/" in page_name: return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+    # Security: prevent directory traversal
+    if ".." in page_name or "/" in page_name:
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+    
     file_path = CLIENT_DIR / f"{page_name}.html"
-    if file_path.exists(): return FileResponse(file_path)
+    if file_path.exists():
+        return FileResponse(file_path)
     return JSONResponse(content={"error": "Page not found"}, status_code=404)
 
+# QR Validation page
 @app.get("/qr-validate")
 async def qr_validate_page():
-    if (CLIENT_DIR / "qr_validate.html").exists(): return FileResponse(CLIENT_DIR / "qr_validate.html")
-    return JSONResponse(content={"error": "Not found"}, status_code=404)
+    file_path = CLIENT_DIR / "qr_validate.html"
+    if file_path.exists():
+        return FileResponse(file_path)
+    return JSONResponse(content={"error": "qr_validate.html not found"}, status_code=404)
 
+# Signup endpoint with enhanced bcrypt security
 @app.post("/signup")
 async def signup(user: UserSignup):
-    if len(user.password) < 8: raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password too short")
-    hashed = hash_password(user.password)
-    user_doc = {"email": user.email, "password_hash": hashed, "created_at": datetime.utcnow()}
+    # Enhanced password validation
+    if len(user.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long"
+        )
     
+    # Check for special character
+    special_chars = "!@#$%^&*()_+-=[]{}|;:,.<>?"
+    if not any(char in special_chars for char in user.password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least one special character (!@#$%^&*()_+-=[]{}|;:,.<>?)"
+        )
+    
+    # Hash password with bcrypt (using helper to handle 72-byte limit)
+    hashed_password = hash_password(user.password, rounds=12)
+    
+    user_doc = {
+        "email": user.email,
+        "password_hash": hashed_password,
+        "created_at": datetime.utcnow(),
+        "security_level": "bcrypt-12-rounds"
+    }
+    
+    # Use MongoDB if connected, otherwise use in-memory storage
     if mongodb_connected:
         try:
-            col = get_user_collection()
-            if await col.find_one({"email": user.email}): raise HTTPException(status.HTTP_400_BAD_REQUEST, "User exists")
-            await col.insert_one(user_doc)
-        except Exception as e: raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e))
+            user_collection = get_user_collection()
+            
+            # Check if user already exists
+            existing_user = await user_collection.find_one({"email": user.email})
+            if existing_user:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User already exists"
+                )
+            
+            # Insert user into MongoDB
+            await user_collection.insert_one(user_doc)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error: {str(e)}"
+            )
     else:
-        if user.email in in_memory_users: raise HTTPException(status.HTTP_400_BAD_REQUEST, "User exists")
+        # Use in-memory storage
+        if user.email in in_memory_users:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User already exists"
+            )
         in_memory_users[user.email] = user_doc
-    return {"message": "User registered"}
+    
+    return {"message": "User registered successfully with enhanced security"}
 
+# OTP Endpoints
 @app.post("/send_signup_otp")
 async def send_signup_otp(request: OTPRequest):
-    if not await check_otp_rate_limit(request.email, "signup"):
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Rate limit exceeded")
+    """Send OTP for signup verification"""
+    email = request.email.lower().strip()
+    password = request.password
     
-    otp = generate_otp()
-    await send_email_otp(request.email, otp, "signup")
-    await store_otp(request.email, otp, "signup")
+    if not password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password is required for signup"
+        )
     
-    hashed = hash_password(request.password)
-    if not mongodb_connected:
-        in_memory_temp_passwords[request.email] = {"password_hash": hashed, "expires_at": datetime.utcnow() + timedelta(minutes=10)}
-    else:
+    # Validate password
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long"
+        )
+    
+    special_chars = "!@#$%^&*()_+-=[]{}|;:,.<>?"
+    if not any(char in special_chars for char in password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least one special character (!@#$%^&*()_+-=[]{}|;:,.<>?)"
+        )
+    
+    # Check if user already exists
+    if mongodb_connected:
         try:
-            col = mongodb_client[DATABASE_NAME]["temp_passwords"]
-            await col.delete_many({"email": request.email})
-            await col.insert_one({"email": request.email, "password_hash": hashed, "created_at": datetime.utcnow(), "expires_at": datetime.utcnow() + timedelta(minutes=10)})
-        except: pass
-
-    return {"message": "OTP sent successfully"}
+            user_collection = get_user_collection()
+            existing_user = await user_collection.find_one({"email": email})
+            if existing_user:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User already exists"
+                )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error: {str(e)}"
+            )
+    else:
+        if email in in_memory_users:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User already exists"
+            )
+    
+    # Check rate limit
+    if not await check_otp_rate_limit(email, "signup"):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many OTP requests. Please wait 15 minutes before requesting again."
+        )
+    
+    # Generate and send OTP
+    otp_code = generate_otp()
+    # Calls our new N8N function
+    await send_email_otp(email, otp_code, "signup")
+    
+    # Store OTP (also store password temporarily for signup completion)
+    await store_otp(email, otp_code, "signup")
+    
+    # Store password temporarily in memory (will be used after OTP verification)
+    if mongodb_connected:
+        try:
+            temp_passwords_collection = mongodb_client[DATABASE_NAME]["temp_passwords"]
+            await temp_passwords_collection.delete_many({"email": email})
+            await temp_passwords_collection.insert_one({
+                "email": email,
+                "password_hash": hash_password(password, rounds=12),
+                "created_at": datetime.utcnow(),
+                "expires_at": datetime.utcnow() + timedelta(minutes=10)
+            })
+        except:
+            pass  # Fallback to in-memory
+    else:
+        in_memory_temp_passwords[email] = {
+            "password_hash": hash_password(password, rounds=12),
+            "expires_at": datetime.utcnow() + timedelta(minutes=10)
+        }
+    
+    return {
+        "message": "OTP sent successfully",
+        "email": email,
+        "expires_in": "5 minutes"
+    }
 
 @app.post("/verify_signup_otp")
 async def verify_signup_otp(verification: OTPVerification):
-    res = await verify_otp(verification.email, verification.otp_code, "signup")
-    if not res["valid"]: raise HTTPException(status.HTTP_400_BAD_REQUEST, res["error"])
+    """Verify OTP and complete signup"""
+    email = verification.email.lower().strip()
+    otp_code = verification.otp_code.strip()
     
+    # Verify OTP
+    result = await verify_otp(email, otp_code, "signup")
+    if not result["valid"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result["error"]
+        )
+    
+    # Get stored password
     password_hash = None
     if mongodb_connected:
         try:
-            col = mongodb_client[DATABASE_NAME]["temp_passwords"]
-            doc = await col.find_one({"email": verification.email})
-            if doc: 
-                password_hash = doc["password_hash"]
-                await col.delete_one({"_id": doc["_id"]})
-        except: pass
+            temp_passwords_collection = mongodb_client[DATABASE_NAME]["temp_passwords"]
+            temp_doc = await temp_passwords_collection.find_one({"email": email})
+            if temp_doc:
+                password_hash = temp_doc["password_hash"]
+                # Delete temp password
+                await temp_passwords_collection.delete_one({"_id": temp_doc["_id"]})
+        except:
+            pass
     
-    if not password_hash and verification.email in in_memory_temp_passwords:
-        password_hash = in_memory_temp_passwords[verification.email]["password_hash"]
-        del in_memory_temp_passwords[verification.email]
-        
-    if not password_hash: raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password data expired")
+    if not password_hash:
+        # Try in-memory
+        if email in in_memory_temp_passwords:
+            temp_data = in_memory_temp_passwords[email]
+            if datetime.utcnow() <= temp_data["expires_at"]:
+                password_hash = temp_data["password_hash"]
+            del in_memory_temp_passwords[email]
     
-    user_doc = {"email": verification.email, "password_hash": password_hash, "created_at": datetime.utcnow()}
+    if not password_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password data expired. Please start signup again."
+        )
+    
+    # Create user account
+    user_doc = {
+        "email": email,
+        "password_hash": password_hash,
+        "created_at": datetime.utcnow(),
+        "security_level": "bcrypt-12-rounds",
+        "email_verified": True
+    }
+    
     if mongodb_connected:
-        await get_user_collection().insert_one(user_doc)
+        try:
+            user_collection = get_user_collection()
+            await user_collection.insert_one(user_doc)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create account: {str(e)}"
+            )
     else:
-        in_memory_users[verification.email] = user_doc
-        
-    return {"message": "Account created"}
+        in_memory_users[email] = user_doc
+    
+    return {
+        "message": "Account created successfully. Please login.",
+        "email": email
+    }
 
+@app.post("/send_forgot_otp")
+async def send_forgot_otp(request: OTPRequest):
+    """Send OTP for password reset"""
+    email = request.email.lower().strip()
+    
+    # Check if user exists
+    user_exists = False
+    if mongodb_connected:
+        try:
+            user_collection = get_user_collection()
+            user = await user_collection.find_one({"email": email})
+            user_exists = user is not None
+        except:
+            pass
+    else:
+        user_exists = email in in_memory_users
+    
+    # For security, don't reveal if user exists or not
+    # Always send OTP (but only verify if user exists)
+    
+    # Check rate limit
+    if not await check_otp_rate_limit(email, "forgot_password"):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many OTP requests. Please wait 15 minutes before requesting again."
+        )
+    
+    # Generate and send OTP
+    otp_code = generate_otp()
+    await send_email_otp(email, otp_code, "forgot_password")
+    
+    # Store OTP
+    await store_otp(email, otp_code, "forgot_password")
+    
+    return {
+        "message": "If an account exists with this email, an OTP has been sent.",
+        "email": email,
+        "expires_in": "5 minutes"
+    }
+
+async def generate_verification_token(email: str) -> str:
+    """Generate a secure verification token for password reset"""
+    token = uuid4().hex
+    expires_at = datetime.utcnow() + timedelta(minutes=15)  # 15 minutes validity
+    
+    token_data = {
+        "email": email,
+        "expires_at": expires_at,
+        "created_at": datetime.utcnow()
+    }
+    
+    if mongodb_connected:
+        try:
+            tokens_collection = mongodb_client[DATABASE_NAME]["verification_tokens"]
+            await tokens_collection.delete_many({"email": email})  # Remove old tokens
+            await tokens_collection.insert_one({
+                "token": token,
+                "email": email,
+                "expires_at": expires_at,
+                "created_at": datetime.utcnow()
+            })
+        except:
+            pass  # Fallback to in-memory
+    
+    in_memory_verification_tokens[token] = token_data
+    return token
+
+async def verify_verification_token(token: str) -> dict:
+    """Verify a password reset token"""
+    if mongodb_connected:
+        try:
+            tokens_collection = mongodb_client[DATABASE_NAME]["verification_tokens"]
+            token_doc = await tokens_collection.find_one({"token": token})
+            if not token_doc:
+                return {"valid": False, "error": "Invalid verification token"}
+            
+            expires_at = token_doc["expires_at"]
+            if datetime.utcnow() > expires_at:
+                await tokens_collection.delete_one({"token": token})
+                return {"valid": False, "error": "Verification token has expired"}
+            
+            return {"valid": True, "email": token_doc["email"]}
+        except:
+            pass
+    
+    # In-memory check
+    if token not in in_memory_verification_tokens:
+        return {"valid": False, "error": "Invalid verification token"}
+    
+    token_data = in_memory_verification_tokens[token]
+    if datetime.utcnow() > token_data["expires_at"]:
+        del in_memory_verification_tokens[token]
+        return {"valid": False, "error": "Verification token has expired"}
+    
+    return {"valid": True, "email": token_data["email"]}
+
+@app.post("/verify_forgot_otp")
+async def verify_forgot_otp(verification: OTPVerification):
+    """Verify OTP for password reset and return verification token"""
+    email = verification.email.lower().strip()
+    otp_code = verification.otp_code.strip()
+    
+    # Verify OTP
+    result = await verify_otp(email, otp_code, "forgot_password")
+    if not result["valid"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result["error"]
+        )
+    
+    # Check if user exists
+    user_exists = False
+    if mongodb_connected:
+        try:
+            user_collection = get_user_collection()
+            user = await user_collection.find_one({"email": email})
+            user_exists = user is not None
+        except:
+            pass
+    else:
+        user_exists = email in in_memory_users
+    
+    if not user_exists:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Generate verification token (more secure than storing OTP in localStorage)
+    verification_token = await generate_verification_token(email)
+    
+    return {
+        "message": "OTP verified successfully. You can now reset your password.",
+        "email": email,
+        "verification_token": verification_token,
+        "expires_in": "15 minutes"
+    }
+
+@app.post("/reset_password")
+async def reset_password(reset: PasswordReset):
+    """Reset password after OTP verification (legacy - accepts OTP)"""
+    email = reset.email.lower().strip()
+    otp_code = reset.otp_code.strip()
+    new_password = reset.new_password
+    
+    # Verify OTP again (for extra security)
+    result = await verify_otp(email, otp_code, "forgot_password")
+    if not result["valid"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result["error"]
+        )
+    
+    # Continue with password reset...
+    return await _reset_password_internal(email, new_password)
+
+@app.post("/reset_password_with_token")
+async def reset_password_with_token(reset: PasswordResetWithToken):
+    """Reset password using verification token (more secure)"""
+    verification_token = reset.verification_token.strip()
+    new_password = reset.new_password
+    
+    # Verify token
+    token_result = await verify_verification_token(verification_token)
+    if not token_result["valid"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=token_result["error"]
+        )
+    
+    email = token_result["email"]
+    
+    # Delete used token
+    if mongodb_connected:
+        try:
+            tokens_collection = mongodb_client[DATABASE_NAME]["verification_tokens"]
+            await tokens_collection.delete_one({"token": verification_token})
+        except:
+            pass
+    
+    if verification_token in in_memory_verification_tokens:
+        del in_memory_verification_tokens[verification_token]
+    
+    return await _reset_password_internal(email, new_password)
+
+async def _reset_password_internal(email: str, new_password: str):
+    """Internal function to reset password"""
+    # Validate new password
+    if len(new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long"
+        )
+    
+    special_chars = "!@#$%^&*()_+-=[]{}|;:,.<>?"
+    if not any(char in special_chars for char in new_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least one special character (!@#$%^&*()_+-=[]{}|;:,.<>?)"
+        )
+    
+    # Hash new password (using helper to handle 72-byte limit)
+    hashed_password = hash_password(new_password, rounds=12)
+    
+    # Update password
+    if mongodb_connected:
+        try:
+            user_collection = get_user_collection()
+            result = await user_collection.update_one(
+                {"email": email},
+                {"$set": {
+                    "password_hash": hashed_password,
+                    "password_reset_at": datetime.utcnow()
+                }}
+            )
+            if result.matched_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to reset password: {str(e)}"
+            )
+    else:
+        if email not in in_memory_users:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        in_memory_users[email]["password_hash"] = hashed_password
+        in_memory_users[email]["password_reset_at"] = datetime.utcnow()
+    
+    return {
+        "message": "Password reset successfully. Please login with your new password.",
+        "email": email
+    }
+
+# Login rate limiting check
+async def check_login_rate_limit(email: str) -> dict:
+    """Check login rate limit (max 5 attempts per 15 minutes)"""
+    key = f"login:{email}"
+    now = datetime.utcnow()
+    fifteen_min_ago = now - timedelta(minutes=15)
+    
+    if key not in in_memory_login_attempts:
+        in_memory_login_attempts[key] = []
+    
+    # Clean old attempts
+    in_memory_login_attempts[key] = [
+        attempt for attempt in in_memory_login_attempts[key]
+        if attempt > fifteen_min_ago
+    ]
+    
+    attempts = in_memory_login_attempts[key]
+    if len(attempts) >= 5:
+        # Calculate time until next attempt allowed
+        oldest_attempt = min(attempts)
+        next_allowed = oldest_attempt + timedelta(minutes=15)
+        wait_time = (next_allowed - now).total_seconds()
+        return {
+            "allowed": False,
+            "wait_seconds": max(0, int(wait_time)),
+            "message": f"Too many login attempts. Please wait {int(wait_time/60)} minutes."
+        }
+    
+    return {"allowed": True}
+
+def record_failed_login(email: str):
+    """Record a failed login attempt"""
+    key = f"login:{email}"
+    if key not in in_memory_login_attempts:
+        in_memory_login_attempts[key] = []
+    in_memory_login_attempts[key].append(datetime.utcnow())
+
+def clear_login_attempts(email: str):
+    """Clear login attempts after successful login"""
+    key = f"login:{email}"
+    if key in in_memory_login_attempts:
+        del in_memory_login_attempts[key]
+
+# Login endpoint with bcrypt verification and rate limiting
 @app.post("/login")
 async def login(user: UserLogin):
+    email = user.email.lower().strip()
+    
+    # Check rate limit
+    rate_limit = await check_login_rate_limit(email)
+    if not rate_limit["allowed"]:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=rate_limit["message"]
+        )
+    
     db_user = None
+    
+    # Use MongoDB if connected, otherwise use in-memory storage
     if mongodb_connected:
-        try: db_user = await get_user_collection().find_one({"email": user.email})
-        except: pass
+        try:
+            user_collection = get_user_collection()
+            db_user = await user_collection.find_one({"email": email})
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error: {str(e)}"
+            )
     else:
-        db_user = in_memory_users.get(user.email)
-        
-    if not db_user or not verify_password(user.password, db_user["password_hash"]):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
-        
-    token = create_access_token({"sub": user.email})
-    return {"message": "Login successful", "token": token}
+        # Use in-memory storage
+        db_user = in_memory_users.get(email)
+    
+    if not db_user:
+        record_failed_login(email)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials"
+        )
+    
+    # Verify password with bcrypt (using helper to handle 72-byte limit)
+    if not verify_password(user.password, db_user["password_hash"]):
+        record_failed_login(email)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials"
+        )
+    
+    # Clear failed login attempts on success
+    clear_login_attempts(email)
+    
+    # Generate JWT token
+    token_data = {"sub": email}
+    access_token = create_access_token(data=token_data)
+    
+    return {
+        "message": "Login successful",
+        "token": access_token,
+        "security_info": "Password verified with bcrypt, JWT token generated"
+    }
 
+# Enhanced chat endpoint with encryption
 @app.post("/chat")
 async def chat(message: ChatMessage):
-    return {"reply": encrypt_message(f"Response for: {message.user_message}"), "encrypted": True}
+    # Encrypt the response message
+    response_text = f"This is a secure response for: {message.user_message}"
+    encrypted_response = encrypt_message(response_text)
+    
+    return {
+        "reply": encrypted_response,
+        "encrypted": True,
+        "security_note": "Response encrypted with AES-256-CBC"
+    }
 
-@app.post("/create_session")
+# Secure QR Code endpoint with encrypted tokens
+@app.get("/generate_qr")
+async def generate_qrcode(user_email: str = Query(..., description="User email for QR code")):
+    try:
+        # Generate encrypted token
+        encrypted_token = generate_qr_token(user_email)
+        if not encrypted_token:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate QR token"
+            )
+        
+        # Store token in MongoDB with expiry
+        qr_tokens_collection = get_qr_tokens_collection() if mongodb_connected else None
+        
+        token_doc = {
+            "token": encrypted_token,
+            "user_email": user_email,
+            "created_at": datetime.utcnow(),
+            "expires_at": datetime.utcnow() + timedelta(minutes=1),
+            "used": False
+        }
+        
+        if qr_tokens_collection:
+            await qr_tokens_collection.insert_one(token_doc)
+        
+        # Generate QR code with encrypted token (not raw email)
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(encrypted_token)  # Encrypted token instead of raw email
+        qr.make(fit=True)
+        
+        # Create image
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        # Convert to bytes
+        img_buffer = io.BytesIO()
+        img.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        
+        return Response(content=img_buffer.getvalue(), media_type="image/png")
+        
+    except Exception as e:
+        print(f"QR generation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate QR code"
+        )
+
+# QR Token validation endpoint
+@app.post("/validate_qr")
+async def validate_qr_token_endpoint(qr_token: QRToken):
+    try:
+        # Validate the encrypted token
+        validation_result = validate_qr_token(qr_token.token)
+        
+        if not validation_result["valid"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=validation_result["error"]
+            )
+        
+        # Check if token exists in MongoDB and hasn't been used
+        if mongodb_connected:
+            qr_tokens_collection = get_qr_tokens_collection()
+            token_doc = await qr_tokens_collection.find_one({
+                "token": qr_token.token,
+                "used": False
+            })
+            
+            if not token_doc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Token not found or already used"
+                )
+            
+            # Mark token as used
+            await qr_tokens_collection.update_one(
+                {"token": qr_token.token},
+                {"$set": {"used": True, "used_at": datetime.utcnow()}}
+            )
+        
+        # Generate JWT token for the user
+        user_email = validation_result["user_email"]
+        token_data = {"sub": user_email}
+        access_token = create_access_token(data=token_data)
+        
+        return {
+            "message": "QR token validated successfully",
+            "token": access_token,
+            "user_email": user_email,
+            "security_info": "QR token validated, JWT generated, token marked as used"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"QR validation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to validate QR token"
+        )
+
+# New: Create private session and room-based WebSocket
+class CreateSessionResponse(BaseModel):
+    session_id: str
+    join_url: str
+
+@app.post("/create_session", response_model=CreateSessionResponse)
 async def create_session():
-    sid = uuid4().hex
+    session_id = uuid4().hex
     created_at = datetime.utcnow().isoformat()
     
     # Store session in MongoDB for persistent room access
     if mongodb_connected:
         try:
-            await get_sessions_collection().insert_one({"session_id": sid, "created_at": created_at})
+            await get_sessions_collection().insert_one({"session_id": session_id, "created_at": created_at})
         except: pass
     else:
-        SESSIONS[sid] = {"created_at": created_at}
+        SESSIONS[session_id] = {"created_at": created_at}
         
-    return {"session_id": sid, "join_url": f"/static/chat.html?session_id={sid}"}
+    return {"session_id": session_id, "join_url": f"/static/chat.html?session_id={session_id}"}
 
 @app.get("/qr_from_session/{session_id}")
 async def qr_from_session(session_id: str):
@@ -533,6 +1147,7 @@ async def qr_from_session(session_id: str):
     if not session_exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    # Encode a full join URL for sharing (client will request relative path)
     join_url = f"/static/chat.html?session_id={session_id}"
     try:
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
