@@ -77,7 +77,7 @@
       background-color: #14161f;
     }
 
-    /* --- NEW MESSAGE STYLING --- */
+    /* --- MESSAGE STYLING --- */
     .message-wrapper {
       display: flex;
       flex-direction: column;
@@ -114,12 +114,12 @@
     /* Decrypted (Readable) Section */
     .decrypted-block {
       padding: 12px 15px;
-      background: #1e2029; /* Slightly darker than card */
+      background: #1e2029;
       border-bottom: 1px solid #2c2f3a;
     }
     
     .decrypted-block.sent-style {
-         background: #3d5afe; /* Blue background for sent messages */
+         background: #3d5afe;
          color: white;
     }
 
@@ -146,7 +146,7 @@
       background: #000000;
       font-family: 'Courier New', monospace;
       font-size: 12px;
-      color: #28a745; /* Matrix Green */
+      color: #28a745;
       border-top: 1px solid #333;
     }
 
@@ -213,6 +213,7 @@
         color: white;
     }
 
+    /* Notifications */
     .notification {
       position: fixed;
       top: 20px;
@@ -268,7 +269,10 @@
         float: right;
         cursor: pointer;
         font-size: 20px;
+        color: #aaa;
     }
+    
+    .close:hover { color: white; }
   </style>
 </head>
 <body>
@@ -276,13 +280,12 @@
     <div class="header">
       <h2>🛡️ Secure Chat <span style="font-size:12px; background:#28a745; padding:2px 6px; border-radius:4px; color:white; margin-left:10px;">AES-256 Active</span></h2>
       <div class="header-buttons">
-        <button class="btn qr-btn" onclick="copyInvite()">🔗 Invite</button>
+        <button class="btn qr-btn" onclick="openQRModal()">📱 QR / Invite</button>
         <button class="btn logout-btn" onclick="logout()">Logout</button>
       </div>
     </div>
     
     <div class="chat-container" id="chat-box">
-      <!-- Messages will appear here -->
       <div style="text-align:center; color:#555; font-size:13px; margin-top:20px;">
          Start of encrypted session
       </div>
@@ -298,12 +301,15 @@
   
   <div id="notification-container"></div>
 
+  <!-- QR Code Modal -->
   <div id="qrModal" class="qr-modal">
     <div class="qr-content">
       <span class="close" onclick="closeQRModal()">&times;</span>
       <h3>🔐 Secure QR Code</h3>
-      <div id="qrImage"></div>
-      <p style="color:#8b9bb4; font-size:13px;">Scan to join session securely.</p>
+      <div id="qrImage">Loading...</div>
+      <p style="color:#8b9bb4; font-size:13px; margin: 15px 0;">Scan to join session securely.</p>
+      
+      <button class="btn qr-btn" onclick="copyInvite()" style="width:100%;">📋 Copy Invite Link</button>
     </div>
   </div>
 
@@ -313,7 +319,6 @@
     let sessionId = null;
     let selectedFile = null;
     
-    // Check auth and connect
     window.addEventListener('load', function() {
       const token = localStorage.getItem('authToken');
       if (!token) { window.location.href = '/static/login.html'; return; }
@@ -328,12 +333,13 @@
       }
 
       connectWebSocket(token, sessionId);
+      // Fetch the QR code image and Auto-Open it
+      loadQR(true); 
     });
 
     function connectWebSocket(token, sessionId) {
       if (websocket) return;
 
-      // Mobile/Production SSL Fix
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${wsProtocol}//${window.location.host}/ws/${sessionId}?token=${token}`;
       
@@ -346,18 +352,14 @@
         try {
           const data = JSON.parse(event.data);
           
-          // Handle different message types
           if (data.warning) {
-             // Show red warning card
              addSecurityWarning(data.user, data.message, data.security_info);
           } else if (data.terminated) {
              alert(data.message);
              window.location.href = '/static/index.html';
           } else if (data.encrypted === false) {
-             // Standard Message: Show Decrypted + Encrypted View
              addDualMessage(data.user, data.message, data.ciphertext);
           } else {
-             // Encrypted only (Legacy fallback)
              addDualMessage(data.user, "Message encrypted", data.message); 
           }
         } catch (e) { console.error(e); }
@@ -374,13 +376,6 @@
       const text = input.value.trim();
       if (!text) return;
       
-      // Optimistic UI Update (Show sent message immediately)
-      // We fake the ciphertext for the sender's view or wait for server echo?
-      // Usually better to wait for server echo for accurate ciphertext display, 
-      // but for responsiveness we can show it.
-      // NOTE: Server broadcasts the message back, so we let onmessage handle it
-      // to ensure we display the server-generated ciphertext.
-      
       if (websocket && websocket.readyState === WebSocket.OPEN) {
         websocket.send(JSON.stringify({ user: currentUser, message: text }));
       }
@@ -389,7 +384,6 @@
 
     function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
 
-    // --- THE NEW DUAL MESSAGE DISPLAY ---
     function addDualMessage(user, readableText, cipherText) {
         const chatBox = document.getElementById('chat-box');
         const wrapper = document.createElement('div');
@@ -400,19 +394,15 @@
         const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
         const shortCipher = cipherText ? cipherText : "Encrypted Data unavailable";
         
-        // Different style for "Sent" vs "Received" decrypted block
         const decryptedClass = isMe ? 'decrypted-block sent-style' : 'decrypted-block';
         
         wrapper.innerHTML = `
             <div class="sender-name">${isMe ? 'You' : user}</div>
             <div class="dual-message-card">
-                <!-- 1. Readable Content -->
                 <div class="${decryptedClass}">
                     <div class="block-label">📄 Original Message:</div>
                     <div class="readable-text">${readableText}</div>
                 </div>
-                
-                <!-- 2. Encrypted Content -->
                 <div class="encrypted-block">
                     <div class="block-label">🔒 Encrypted (AES-256):</div>
                     <div class="cipher-text">${shortCipher}</div>
@@ -447,11 +437,35 @@
         chatBox.scrollTop = chatBox.scrollHeight;
     }
 
-    // ... Keep existing utility functions (copyInvite, logout, file handling) ...
+    // --- QR & Modal Logic ---
+    async function loadQR(autoOpen = false) {
+      if(!sessionId) return;
+      try {
+         const r = await fetch(`/qr_from_session/${sessionId}`);
+         if(r.ok) {
+             const b = await r.blob();
+             document.getElementById('qrImage').innerHTML = `<img src="${URL.createObjectURL(b)}" width="200">`;
+             
+             // Auto Open the Modal if requested (e.g. on initial load)
+             if(autoOpen) {
+                 openQRModal();
+             }
+         }
+      } catch(e){ console.error("QR Load Failed", e); }
+    }
+    
+    function openQRModal() {
+        document.getElementById('qrModal').style.display = 'block';
+    }
+
+    function closeQRModal() { 
+        document.getElementById('qrModal').style.display = 'none'; 
+    }
+
     function copyInvite() {
       if (!sessionId) return;
       const link = `${window.location.origin}/static/chat.html?session_id=${sessionId}`;
-      navigator.clipboard.writeText(link).then(() => alert('Link copied!'));
+      navigator.clipboard.writeText(link).then(() => alert('Link copied to clipboard!'));
     }
 
     function logout() {
@@ -460,29 +474,16 @@
     }
     
     function handleFileSelect(e) {
-        // Simplified file handler for this view
-        alert("File upload logic would go here (same as previous version)");
+        alert("File upload logic would go here.");
     }
 
-    // QR Code Logic
-    async function loadQR() {
-         // ... same as previous ...
-    }
-    window.addEventListener('load', async function() {
-      const params = new URLSearchParams(window.location.search);
-      const sid = params.get('session_id');
-      if(sid) {
-          try {
-             const r = await fetch(`/qr_from_session/${sid}`);
-             if(r.ok) {
-                 const b = await r.blob();
-                 document.getElementById('qrImage').innerHTML = `<img src="${URL.createObjectURL(b)}" width="200">`;
-             }
-          } catch(e){}
+    // Close modal if clicked outside
+    window.onclick = function(event) {
+      const modal = document.getElementById('qrModal');
+      if (event.target === modal) {
+        modal.style.display = 'none';
       }
-    });
-    
-    function closeQRModal() { document.getElementById('qrModal').style.display = 'none'; }
+    }
   </script>
 </body>
 </html>
