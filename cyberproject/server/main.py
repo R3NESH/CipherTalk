@@ -28,6 +28,7 @@ import socket
 import urllib.request
 
 # --- FORCE IPv4 FIX ---
+# This monkey-patches socket.getaddrinfo to ignore IPv6, fixing the Render "Network unreachable" error
 old_getaddrinfo = socket.getaddrinfo
 def new_getaddrinfo(*args, **kwargs):
     responses = old_getaddrinfo(*args, **kwargs)
@@ -35,9 +36,9 @@ def new_getaddrinfo(*args, **kwargs):
 socket.getaddrinfo = new_getaddrinfo
 
 # --- PATH CONFIGURATION ---
-BASE_DIR = pathlib.Path(__file__).parent.resolve()
-ROOT_DIR = BASE_DIR.parent
-CLIENT_DIR = ROOT_DIR / "client"
+BASE_DIR = pathlib.Path(__file__).parent.resolve() # /app/server
+ROOT_DIR = BASE_DIR.parent                         # /app
+CLIENT_DIR = ROOT_DIR / "client"                   # /app/client
 
 # Ensure we can import modules from the server directory
 sys.path.append(str(BASE_DIR))
@@ -46,6 +47,7 @@ print(f"📂 Server Directory: {BASE_DIR}")
 print(f"📂 Client Directory: {CLIENT_DIR}")
 
 # --- LIGHTWEIGHT SECURITY MONITOR (RAM EFFICIENT) ---
+# Replaces CatBoost for Free Tier Deployment to prevent OOM crashes
 class SecurityWarning:
     def __init__(self, message):
         self.message = message
@@ -60,8 +62,7 @@ class LightweightMonitor:
         urls = re.findall(r'https?://\S+', message)
         
         for url in urls:
-            # 2. Check for specific phishing patterns
-            # Expanded list to catch 'weebly.com' and generic phishing terms
+            # 2. Check for specific phishing patterns or your test domains
             suspicious_terms = [
                 'square.site', 'brizy.site', 'ngrok', 'bit.ly', 'customer0-answers', 
                 'verify', 'login', 'secure', 'account', 'update', 'banking', 'confirm',
@@ -77,9 +78,11 @@ class LightweightMonitor:
         return warnings
 
     def add_warning(self, warning):
+        # In a real app, save to DB here. 
         pass
 
     def should_terminate_session(self, user, session):
+        # Terminate if they were just flagged
         if session in self.flagged_sessions:
             self.flagged_sessions.remove(session) # Reset
             return True
@@ -88,27 +91,32 @@ class LightweightMonitor:
     def get_warning_count(self, user, session):
         return 1
 
-# Initialize the lightweight monitor
+# Initialize the lightweight monitor instead of the heavy ML one
 security_monitor = LightweightMonitor()
 print("✅ Loaded Lightweight Monitor (RAM Safe for Free Tier)")
 
 # Load environment variables
 load_dotenv(dotenv_path="../.docker.env")
-load_dotenv()
+load_dotenv()  # This will override with .env if it exists in server directory
 
 app = FastAPI(title="Secure Chat App", version="2.0.0")
 
-# Security configuration
+# Security configuration from environment variables
 SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production")
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "1"))
 
-# AES encryption
+# AES encryption configuration
 _aes_key_str = os.getenv("AES_SECRET_KEY", "your-32-character-aes-secret-key-here")
 _aes_iv_str = os.getenv("AES_IV", "your-16-character-iv-here")
 
-if len(_aes_key_str) != 32: _aes_key_str = _aes_key_str.ljust(32, '0') if len(_aes_key_str) < 32 else _aes_key_str[:32]
-if len(_aes_iv_str) != 16: _aes_iv_str = _aes_iv_str.ljust(16, '0') if len(_aes_iv_str) < 16 else _aes_iv_str[:16]
+if len(_aes_key_str) != 32:
+    if len(_aes_key_str) < 32: _aes_key_str = _aes_key_str.ljust(32, '0')
+    else: _aes_key_str = _aes_key_str[:32]
+
+if len(_aes_iv_str) != 16:
+    if len(_aes_iv_str) < 16: _aes_iv_str = _aes_iv_str.ljust(16, '0')
+    else: _aes_iv_str = _aes_iv_str[:16]
 
 AES_SECRET_KEY = _aes_key_str.encode()
 AES_IV = _aes_iv_str.encode()
@@ -121,7 +129,7 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "users")
 mongodb_client = None
 mongodb_connected = False
 
-# In-memory fallback
+# In-memory fallback storage
 in_memory_users = {}
 in_memory_qr_tokens = {}
 in_memory_otps = {}
@@ -153,6 +161,7 @@ class RoomConnectionManager:
                 except: pass
 
 manager = RoomConnectionManager()
+# SESSIONS dict is kept for local fallback, but MongoDB is preferred
 SESSIONS: Dict[str, dict] = {}
 
 # Models
@@ -190,7 +199,7 @@ class PasswordResetWithToken(BaseModel):
 class SessionValidation(BaseModel):
     token: str
 
-# AES Encryption/Decryption
+# AES Encryption/Decryption functions
 def encrypt_message(message: str) -> str:
     try:
         cipher = Cipher(algorithms.AES(AES_SECRET_KEY), modes.CBC(AES_IV), backend=default_backend())
@@ -213,6 +222,7 @@ def decrypt_message(encrypted_message: str) -> str:
         decrypted_data = unpadder.update(decrypted_padded) + unpadder.finalize()
         return decrypted_data.decode()
     except Exception as e:
+        # If decryption fails, it's likely already plaintext or invalid. Return as is.
         return encrypted_message
 
 def generate_qr_token(user_email: str) -> str:
@@ -237,17 +247,26 @@ def validate_qr_token(encrypted_token: str) -> dict:
 def generate_otp() -> str:
     return str(random.randint(100000, 999999))
 
-# N8N OTP Sender
+# --- N8N OTP SENDER ---
 async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> bool:
+    """Send OTP via n8n Webhook"""
+    # Always log to console (Fail-safe)
     print(f"\n{'='*60}\n🚀 TRIGGERING N8N OTP\nTo: {email}\nCode: {otp_code}\n{'='*60}\n")
+    
     n8n_url = os.getenv("N8N_WEBHOOK_URL")
     if not n8n_url:
         print("⚠️  N8N_WEBHOOK_URL not set. OTP printed to console only.")
         return True 
+
     try:
         payload = {"email": email, "otp_code": otp_code, "purpose": purpose, "timestamp": datetime.utcnow().isoformat()}
         data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(n8n_url, data=data, headers={'Content-Type': 'application/json', 'User-Agent': 'SecureChatApp/1.0'}, method='POST')
+        req = urllib.request.Request(
+            n8n_url, 
+            data=data, 
+            headers={'Content-Type': 'application/json', 'User-Agent': 'SecureChatApp/1.0'},
+            method='POST'
+        )
         with urllib.request.urlopen(req, timeout=10) as response:
             print(f"✅ n8n Webhook status: {response.status}")
             return True
@@ -258,6 +277,7 @@ async def send_email_otp(email: str, otp_code: str, purpose: str = "signup") -> 
 async def store_otp(email: str, otp_code: str, purpose: str) -> bool:
     expires_at = datetime.utcnow() + timedelta(minutes=5)
     otp_doc = {"email": email, "otp_code": otp_code, "purpose": purpose, "created_at": datetime.utcnow(), "expires_at": expires_at, "used": False, "attempts": 0}
+    
     if mongodb_connected:
         try:
             col = get_otps_collection()
@@ -304,7 +324,8 @@ async def check_otp_rate_limit(email: str, purpose: str) -> bool:
             count = await col.count_documents({"email": email, "purpose": purpose, "created_at": {"$gte": datetime.utcnow() - timedelta(minutes=15)}})
             return count < 3
         except: return True
-    else: return True
+    else:
+        return True
 
 # DB Helpers
 async def connect_to_mongo():
@@ -319,10 +340,15 @@ async def close_mongo_connection():
 def get_user_collection(): return mongodb_client[DATABASE_NAME][COLLECTION_NAME]
 def get_qr_tokens_collection(): return mongodb_client[DATABASE_NAME]["qr_tokens"]
 def get_otps_collection(): return mongodb_client[DATABASE_NAME]["otps"]
-def get_sessions_collection(): return mongodb_client[DATABASE_NAME]["sessions"]
+def get_sessions_collection():
+    if mongodb_client is None: raise RuntimeError("MongoDB not connected")
+    return mongodb_client[DATABASE_NAME]["sessions"]
 
-def hash_password(password: str, rounds: int = 12) -> str: return bcrypt.hash(password, rounds=rounds)
-def verify_password(password: str, password_hash: str) -> bool: return bcrypt.verify(password, password_hash)
+def hash_password(password: str, rounds: int = 12) -> str:
+    return bcrypt.hash(password, rounds=rounds)
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return bcrypt.verify(password, password_hash)
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -330,33 +356,45 @@ def create_access_token(data: dict):
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(token: str):
-    try: return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub")
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub")
     except: return None
 
-# --- STARTUP ---
+# --- STARTUP EVENT ---
 @app.on_event("startup")
 async def startup_event():
     global mongodb_connected
     try:
         await connect_to_mongo()
         mongodb_connected = True
-        try: await get_sessions_collection().create_index("created_at", expireAfterSeconds=86400)
+        # Index for sessions
+        try:
+            await get_sessions_collection().create_index("created_at", expireAfterSeconds=86400)
         except: pass
         print("✅ MongoDB connected successfully")
     except Exception as e:
         mongodb_connected = False
         print(f"⚠️  MongoDB connection failed: {str(e)[:100]}")
-        print("⚠️  Using in-memory storage")
+        print("⚠️  Using in-memory storage (data will not persist)")
+    
+    print("\n🔐 Security features enabled:")
+    print(f"   - Storage: {'MongoDB' if mongodb_connected else 'In-Memory (temporary)'}")
+    
+    n8n_status = '✅ Automated (n8n Webhook)' if os.getenv('N8N_WEBHOOK_URL') else '⚠️  Development Mode (console output)'
+    print(f"   - OTP System: {n8n_status}")
+    
     print(f"\n🚀 Server is running at http://localhost:8000")
 
 @app.on_event("shutdown")
-async def shutdown_event(): await close_mongo_connection()
+async def shutdown_event():
+    await close_mongo_connection()
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 if CLIENT_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(CLIENT_DIR)), name="static")
-else: print("⚠️  Warning: Client directory not found")
+else:
+    print("⚠️  Warning: Client directory not found")
 
 @app.get("/")
 async def root():
@@ -383,6 +421,7 @@ async def signup(user: UserSignup):
     if len(user.password) < 8: raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password too short")
     hashed = hash_password(user.password)
     user_doc = {"email": user.email, "password_hash": hashed, "created_at": datetime.utcnow()}
+    
     if mongodb_connected:
         try:
             col = get_user_collection()
@@ -396,10 +435,13 @@ async def signup(user: UserSignup):
 
 @app.post("/send_signup_otp")
 async def send_signup_otp(request: OTPRequest):
-    if not await check_otp_rate_limit(request.email, "signup"): raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Rate limit exceeded")
+    if not await check_otp_rate_limit(request.email, "signup"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Rate limit exceeded")
+    
     otp = generate_otp()
     await send_email_otp(request.email, otp, "signup")
     await store_otp(request.email, otp, "signup")
+    
     hashed = hash_password(request.password)
     if not mongodb_connected:
         in_memory_temp_passwords[request.email] = {"password_hash": hashed, "expires_at": datetime.utcnow() + timedelta(minutes=10)}
@@ -409,12 +451,14 @@ async def send_signup_otp(request: OTPRequest):
             await col.delete_many({"email": request.email})
             await col.insert_one({"email": request.email, "password_hash": hashed, "created_at": datetime.utcnow(), "expires_at": datetime.utcnow() + timedelta(minutes=10)})
         except: pass
+
     return {"message": "OTP sent successfully"}
 
 @app.post("/verify_signup_otp")
 async def verify_signup_otp(verification: OTPVerification):
     res = await verify_otp(verification.email, verification.otp_code, "signup")
     if not res["valid"]: raise HTTPException(status.HTTP_400_BAD_REQUEST, res["error"])
+    
     password_hash = None
     if mongodb_connected:
         try:
@@ -424,13 +468,19 @@ async def verify_signup_otp(verification: OTPVerification):
                 password_hash = doc["password_hash"]
                 await col.delete_one({"_id": doc["_id"]})
         except: pass
+    
     if not password_hash and verification.email in in_memory_temp_passwords:
         password_hash = in_memory_temp_passwords[verification.email]["password_hash"]
         del in_memory_temp_passwords[verification.email]
+        
     if not password_hash: raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password data expired")
+    
     user_doc = {"email": verification.email, "password_hash": password_hash, "created_at": datetime.utcnow()}
-    if mongodb_connected: await get_user_collection().insert_one(user_doc)
-    else: in_memory_users[verification.email] = user_doc
+    if mongodb_connected:
+        await get_user_collection().insert_one(user_doc)
+    else:
+        in_memory_users[verification.email] = user_doc
+        
     return {"message": "Account created"}
 
 @app.post("/login")
@@ -439,33 +489,50 @@ async def login(user: UserLogin):
     if mongodb_connected:
         try: db_user = await get_user_collection().find_one({"email": user.email})
         except: pass
-    else: db_user = in_memory_users.get(user.email)
-    if not db_user or not verify_password(user.password, db_user["password_hash"]): raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+    else:
+        db_user = in_memory_users.get(user.email)
+        
+    if not db_user or not verify_password(user.password, db_user["password_hash"]):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+        
     token = create_access_token({"sub": user.email})
     return {"message": "Login successful", "token": token}
 
 @app.post("/chat")
-async def chat(message: ChatMessage): return {"reply": encrypt_message(f"Response for: {message.user_message}"), "encrypted": True}
+async def chat(message: ChatMessage):
+    return {"reply": encrypt_message(f"Response for: {message.user_message}"), "encrypted": True}
 
 @app.post("/create_session")
 async def create_session():
     sid = uuid4().hex
     created_at = datetime.utcnow().isoformat()
+    
+    # Store session in MongoDB for persistent room access
     if mongodb_connected:
-        try: await get_sessions_collection().insert_one({"session_id": sid, "created_at": created_at})
+        try:
+            await get_sessions_collection().insert_one({"session_id": sid, "created_at": created_at})
         except: pass
-    else: SESSIONS[sid] = {"created_at": created_at}
+    else:
+        SESSIONS[sid] = {"created_at": created_at}
+        
     return {"session_id": sid, "join_url": f"/static/chat.html?session_id={sid}"}
 
 @app.get("/qr_from_session/{session_id}")
 async def qr_from_session(session_id: str):
+    # Validate session exists (DB Fallback)
     session_exists = False
     if mongodb_connected:
         try:
-            if await get_sessions_collection().find_one({"session_id": session_id}): session_exists = True
+            if await get_sessions_collection().find_one({"session_id": session_id}):
+                session_exists = True
         except: pass
-    if not session_exists and session_id in SESSIONS: session_exists = True
-    if not session_exists: raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    
+    if not session_exists and session_id in SESSIONS:
+        session_exists = True
+        
+    if not session_exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
     join_url = f"/static/chat.html?session_id={session_id}"
     try:
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
@@ -476,25 +543,39 @@ async def qr_from_session(session_id: str):
         img.save(img_buffer, format='PNG')
         img_buffer.seek(0)
         return Response(content=img_buffer.getvalue(), media_type="image/png")
-    except Exception: raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate QR code")
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate QR code")
 
 @app.websocket("/ws/{session_id}")
 async def websocket_room_endpoint(websocket: WebSocket, session_id: str, token: str = Query(...)):
     user_email = verify_token(token)
+    
+    # Validate session (DB Fallback)
     session_exists = False
     if mongodb_connected:
         try:
-            if await get_sessions_collection().find_one({"session_id": session_id}): session_exists = True
+            if await get_sessions_collection().find_one({"session_id": session_id}):
+                session_exists = True
         except: pass
-    if not session_exists and session_id in SESSIONS: session_exists = True
     
-    if not user_email or not session_exists:
+    if not session_exists and session_id in SESSIONS:
+        session_exists = True
+
+    if not user_email:
+        print(f"WS REJECT: Invalid Token for {session_id}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    
+    if not session_exists:
+        print(f"WS REJECT: Session Not Found {session_id}")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     await manager.connect(session_id, websocket)
     try:
-        await websocket.send_json({"user": "System", "message": encrypt_message(f"Welcome {user_email}!"), "encrypted": True})
+        # Send welcome message (Unencrypted for readability)
+        await websocket.send_json({"user": "System", "message": f"Welcome {user_email}!", "encrypted": False})
+        
         while True:
             data = await websocket.receive_text()
             try:
@@ -502,24 +583,52 @@ async def websocket_room_endpoint(websocket: WebSocket, session_id: str, token: 
                 user = msg_data.get("user", user_email)
                 raw_msg = msg_data.get("message", "")
                 
-                # --- DECRYPT AND SCAN (RAM SAFE) ---
+                # --- 1. ATTEMPT DECRYPTION (FOR ML) ---
+                # We try to decrypt. If it was sent as Plaintext, decrypt returns it as-is.
                 plaintext_for_ml = decrypt_message(raw_msg)
+                
                 print(f"DEBUG: Scanning: {plaintext_for_ml[:30]}...")
 
-                warnings = security_monitor.analyze_message(user_email, session_id, plaintext_for_ml)
-                for w in warnings:
-                    await websocket.send_json({"user": "Security", "message": encrypt_message(f"Warning: {w.message}"), "encrypted": True, "warning": True})
+                # --- 2. SECURITY SCAN (Lightweight) ---
+                if security_monitor:
+                    warnings = security_monitor.analyze_message(user_email, session_id, plaintext_for_ml)
+                    for w in warnings:
+                        security_monitor.add_warning(w)
+                        # Send warning (Plaintext so user can read it)
+                        await websocket.send_json({
+                            "user": "Security", 
+                            "message": f"Warning: {w.message}", 
+                            "encrypted": False, 
+                            "warning": True
+                        })
+                    
+                    if security_monitor.should_terminate_session(user_email, session_id):
+                        term_msg = "Session Terminated due to security threat."
+                        await websocket.send_json({
+                            "user": "System", 
+                            "message": term_msg, 
+                            "encrypted": False, 
+                            "terminated": True
+                        })
+                        await websocket.close()
+                        return
                 
-                if security_monitor.should_terminate_session(user_email, session_id):
-                    term_msg = encrypt_message("Session Terminated due to security threat.")
-                    await websocket.send_json({"user": "System", "message": term_msg, "encrypted": True, "terminated": True})
-                    await websocket.close()
-                    return
+                # --- 3. BROADCAST (READABLE) ---
+                # We send the PLAINTEXT to the room so users can read it.
+                # We also send the 'ciphertext' in a separate field if you want to display it for demo purposes.
+                ciphertext = encrypt_message(plaintext_for_ml)
                 
-                # --- BROADCAST ENCRYPTED ---
-                final_msg = raw_msg if raw_msg != plaintext_for_ml else encrypt_message(raw_msg)
-                await manager.broadcast(session_id, {"user": user, "message": final_msg, "encrypted": True})
-            except Exception as e: print(f"WS Error: {e}")
+                response = {
+                    "user": user,
+                    "message": plaintext_for_ml,  # Send READABLE text
+                    "ciphertext": ciphertext,     # Optional: Keep encrypted version
+                    "encrypted": False,           # UI shouldn't try to decrypt this
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+                await manager.broadcast(session_id, response)
+            except Exception as e:
+                print(f"WS Error: {e}")
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
 
